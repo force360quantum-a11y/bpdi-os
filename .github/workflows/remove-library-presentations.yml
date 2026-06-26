@@ -1,0 +1,125 @@
+name: Remove presentations from BPDI Biblioteca
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/remove-library-presentations.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  remove-presentations:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove presentation documents and embedded payloads
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          html_path = Path('index.html')
+          html = html_path.read_text(encoding='utf-8')
+
+          data_marker = 'window.BPDI_DATA ='
+          data_pos = html.find(data_marker)
+          if data_pos < 0:
+              raise SystemExit('window.BPDI_DATA não encontrado')
+          data_start = html.find('{', data_pos)
+          data, consumed = json.JSONDecoder().raw_decode(html[data_start:])
+          data_end = data_start + consumed
+
+          documents = data.get('documents', [])
+          original_documents = json.loads(json.dumps(documents, ensure_ascii=False))
+
+          def normalized_document_text(doc):
+              fields = [
+                  doc.get('title', ''),
+                  doc.get('description', ''),
+                  doc.get('category', ''),
+                  doc.get('type', ''),
+                  doc.get('filename', ''),
+                  doc.get('path', ''),
+              ]
+              return ' '.join(str(x) for x in fields).lower()
+
+          def is_presentation(doc):
+              text = normalized_document_text(doc)
+              doc_type = str(doc.get('type', '')).lower().strip()
+              filename = str(doc.get('filename', '')).lower().strip()
+              path = str(doc.get('path', '')).lower().strip()
+              return (
+                  'apresentação' in text
+                  or 'apresentacao' in text
+                  or 'presentation' in text
+                  or doc_type in {'ppt', 'pptx', 'powerpoint', 'presentation'}
+                  or filename.endswith(('.ppt', '.pptx'))
+                  or path.endswith(('.ppt', '.pptx'))
+              )
+
+          removed = [doc for doc in documents if is_presentation(doc)]
+          kept = [doc for doc in documents if not is_presentation(doc)]
+
+          if not removed:
+              raise SystemExit('Nenhuma apresentação encontrada; nenhuma alteração aplicada')
+
+          data['documents'] = kept
+          html = html[:data_start] + json.dumps(data, ensure_ascii=False, separators=(',', ':')) + html[data_end:]
+
+          removed_paths = set()
+          for doc in removed:
+              for key in ('path', 'originalPath'):
+                  value = doc.get(key)
+                  if value:
+                      removed_paths.add(value)
+
+          embedded_marker = 'window.BPDI_EMBEDDED='
+          embedded_pos = html.find(embedded_marker)
+          if embedded_pos >= 0:
+              expr_start = embedded_pos + len(embedded_marker)
+              semi = html.find(';', expr_start)
+              if semi < 0:
+                  raise SystemExit('Fim de window.BPDI_EMBEDDED não encontrado')
+              expr = html[expr_start:semi].strip()
+              embedded = {}
+              try:
+                  obj_start = expr.find('{')
+                  if obj_start >= 0:
+                      embedded, _ = json.JSONDecoder().raw_decode(expr[obj_start:])
+              except Exception:
+                  embedded = {}
+
+              for path in list(embedded.keys()):
+                  if path in removed_paths:
+                      embedded.pop(path, None)
+
+              html = html[:expr_start] + json.dumps(embedded, ensure_ascii=False, separators=(',', ':')) + html[semi:]
+
+          if any(is_presentation(doc) for doc in data['documents']):
+              raise SystemExit('Validação falhou: ainda há apresentação na Biblioteca')
+
+          original_kept = [doc for doc in original_documents if not is_presentation(doc)]
+          if data['documents'] != original_kept:
+              raise SystemExit('Validação falhou: documento não relacionado foi alterado')
+
+          html_path.write_text(html, encoding='utf-8')
+
+          print('Apresentações removidas:')
+          for doc in removed:
+              print('-', doc.get('title', '(sem título)'))
+          print(f'Biblioteca: {len(original_documents)} -> {len(kept)} documentos')
+          PY
+
+      - name: Remove temporary workflow and commit
+        run: |
+          rm -f .github/workflows/remove-library-presentations.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: remove apresentações da Biblioteca BPDI"
+          git push origin main
