@@ -1,0 +1,137 @@
+name: Add BPDI XP presentation v2 PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/bpdi_xp_v2_pdf_b64/part-*"
+      - ".github/workflows/add-bpdi-pdf-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  update-library:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Rebuild and validate compact PDF
+        run: |
+          cat tools/bpdi_xp_v2_pdf_b64/part-* > /tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf.b64
+          base64 -d /tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf.b64 > /tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf
+          file /tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf | grep -q 'PDF document'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('/tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf')
+          b = p.read_bytes()
+          if not b.startswith(b'%PDF-'):
+              raise SystemExit('PDF inválido')
+          pages = len(re.findall(rb'/Type\s*/Page\b', b))
+          if pages != 11:
+              raise SystemExit(f'Quantidade inesperada de páginas: {pages}')
+          if len(b) > 1_000_000:
+              raise SystemExit(f'PDF acima do limite de compatibilidade: {len(b)} bytes')
+          print(f'PDF validado: {len(b)} bytes; {pages} páginas')
+          PY
+
+      - name: Embed PDF and add Biblioteca entry
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, json
+
+          html_path = Path('index.html')
+          html = html_path.read_text(encoding='utf-8')
+
+          resource_path = 'embedded/BPDI_XP_Apresentacao_v2_COMPACT.pdf'
+          filename = 'BPDI_XP_Apresentacao_v2_COMPACT.pdf'
+          title = 'Apresentação BPDI — XP Investimentos v2'
+          pdf_bytes = Path('/tmp/BPDI_XP_Apresentacao_v2_COMPACT.pdf').read_bytes()
+          pdf_b64 = base64.b64encode(pdf_bytes).decode('ascii')
+
+          marker = 'window.BPDI_EMBEDDED='
+          start = html.find(marker)
+          if start < 0:
+              raise SystemExit('window.BPDI_EMBEDDED não encontrado')
+          expr_start = start + len(marker)
+          semi = html.find(';', expr_start)
+          if semi < 0:
+              raise SystemExit('Fim de BPDI_EMBEDDED não encontrado')
+          expr = html[expr_start:semi].strip()
+          embedded = {}
+          try:
+              obj_start = expr.find('{')
+              if obj_start >= 0:
+                  embedded, _ = json.JSONDecoder().raw_decode(expr[obj_start:])
+          except Exception:
+              embedded = {}
+
+          if resource_path in embedded:
+              raise SystemExit('PDF já está embutido; operação interrompida para evitar duplicação')
+
+          embedded[resource_path] = {
+              'mime': 'application/pdf',
+              'name': filename,
+              'b64': pdf_b64,
+          }
+          html = html[:expr_start] + json.dumps(embedded, ensure_ascii=False, separators=(',', ':')) + html[semi:]
+
+          data_marker = 'window.BPDI_DATA ='
+          data_pos = html.find(data_marker)
+          if data_pos < 0:
+              raise SystemExit('window.BPDI_DATA não encontrado')
+          json_start = html.find('{', data_pos)
+          data, consumed = json.JSONDecoder().raw_decode(html[json_start:])
+          json_end = json_start + consumed
+
+          docs = data.setdefault('documents', [])
+          snapshot = json.loads(json.dumps(docs, ensure_ascii=False))
+          if any(d.get('title') == title or d.get('path') == resource_path for d in docs):
+              raise SystemExit('Documento já existe na Biblioteca; nenhuma duplicação criada')
+
+          new_doc = {
+              'title': title,
+              'type': 'PDF',
+              'category': 'Apresentação Institucional',
+              'description': 'Apresentação institucional completa da plataforma BPDI para a XP Investimentos. 11 slides. Junho 2026.',
+              'date': '2026-06-26',
+              'path': resource_path,
+              'filename': filename,
+              'preview': True,
+              'restricted': True,
+          }
+
+          insert_at = min(2, len(docs))
+          docs.insert(insert_at, new_doc)
+          preserved = docs[:insert_at] + docs[insert_at + 1:]
+          if preserved != snapshot:
+              raise SystemExit('Validação falhou: documento existente seria alterado')
+
+          html = html[:json_start] + json.dumps(data, ensure_ascii=False, separators=(',', ':')) + html[json_end:]
+
+          if html.count(title) != 1:
+              raise SystemExit('Título ausente ou duplicado')
+          if html.count(resource_path) < 2:
+              raise SystemExit('PDF embutido não associado à Biblioteca')
+
+          html_path.write_text(html, encoding='utf-8')
+          print(f'Biblioteca atualizada: {len(snapshot)} -> {len(docs)} documentos')
+          PY
+
+      - name: Remove temporary payload and workflow
+        run: |
+          rm -rf tools/bpdi_xp_v2_pdf_b64
+          rm -f .github/workflows/add-bpdi-pdf-v2.yml
+          rmdir tools 2>/dev/null || true
+
+      - name: Commit final platform update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: adiciona apresentação BPDI XP v2 à Biblioteca"
+          git push origin main
