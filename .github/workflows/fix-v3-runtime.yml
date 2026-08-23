@@ -1,0 +1,99 @@
+name: Repair BPDI V3 runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fix-v3-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch V3 runtime
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+
+          bad = "Conteúdo integral preservado para rastreabilidade. A seção 'ATUALIZAÇÃO CANÔNICA V3' prevalece sobre formulações históricas incompatíveis."
+          good = "Conteúdo integral preservado para rastreabilidade. A seção ATUALIZAÇÃO CANÔNICA V3 prevalece sobre formulações históricas incompatíveis."
+          if bad not in s:
+              raise SystemExit('Fatal quote target not found')
+          s = s.replace(bad, good, 1)
+
+          old = """// Gate and boot
+$('#confidentialAgree').onchange=e=>$('#enterApp').disabled=!e.target.checked;
+$('#enterApp').onclick=async()=>{const stored=localStorage.getItem('bpdi_pin_hash');if(stored){const pin=prompt('Digite o PIN local:');if(await sha256(pin||'')!==stored){toast('PIN incorreto');return}}localStorage.setItem('bpdi_confidential_accept','1');$('#confidentialGate').classList.add('hidden');render('dashboard')};
+const accepted=localStorage.getItem('bpdi_confidential_accept')==='1'; const hasPin=!!localStorage.getItem('bpdi_pin_hash'); if(accepted&&!hasPin){$('#confidentialGate').classList.add('hidden')}else if(hasPin){$('#confidentialAgree').checked=true;$('#enterApp').disabled=false}
+"""
+          new = """// Gate and boot — V3.0.1
+const agreeBox=$('#confidentialAgree');
+const enterBtn=$('#enterApp');
+function syncGateButton(){if(agreeBox&&enterBtn)enterBtn.disabled=!agreeBox.checked}
+agreeBox?.addEventListener('change',syncGateButton);
+agreeBox?.addEventListener('input',syncGateButton);
+window.addEventListener('pageshow',syncGateButton);
+setTimeout(syncGateButton,0);
+enterBtn?.addEventListener('click',async()=>{
+  if(!agreeBox?.checked){syncGateButton();return}
+  const stored=localStorage.getItem('bpdi_pin_hash');
+  if(stored){
+    const pin=prompt('Digite o PIN local:');
+    if(await sha256(pin||'')!==stored){toast('PIN incorreto');return}
+  }
+  localStorage.setItem('bpdi_confidential_accept','1');
+  $('#confidentialGate')?.classList.add('hidden');
+  render('dashboard');
+});
+const accepted=localStorage.getItem('bpdi_confidential_accept')==='1';
+const hasPin=!!localStorage.getItem('bpdi_pin_hash');
+if(accepted&&!hasPin){$('#confidentialGate')?.classList.add('hidden')}
+else if(hasPin){agreeBox.checked=true;syncGateButton()}
+"""
+          if old not in s:
+              raise SystemExit('Gate block target not found')
+          s = s.replace(old, new, 1)
+
+          s = s.replace('Versão 3.0.0 · agosto/2026 · dados no navegador', 'Versão 3.0.1 · agosto/2026 · dados no navegador', 1)
+          s = s.replace('"version":"3.0.0","generated":"2026-08-23"', '"version":"3.0.1","generated":"2026-08-23"', 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validate JavaScript syntax
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          h=Path('index.html').read_text(encoding='utf-8')
+          scripts=re.findall(r'<script[^>]*>(.*?)</script>',h,re.S)
+          Path('/tmp/bpdi-inline.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/bpdi-inline.js
+
+      - name: Validate V3.0.1 markers
+        run: |
+          grep -q "Versão 3.0.1" index.html
+          grep -q "A seção ATUALIZAÇÃO CANÔNICA V3 prevalece" index.html
+          grep -q "Gate and boot — V3.0.1" index.html
+
+      - name: Commit repaired runtime
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git commit -m "fix: BPDI Platform OS v3.0.1 runtime and access gate"
+          git push origin main
