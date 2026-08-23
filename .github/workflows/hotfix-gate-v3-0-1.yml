@@ -1,0 +1,58 @@
+name: Hotfix BPDI Gate V3.0.1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/hotfix-gate-v3-0-1.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  hotfix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch access gate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          h=p.read_text(encoding='utf-8')
+          old="""// Gate and boot
+$('#confidentialAgree').onchange=e=>$('#enterApp').disabled=!e.target.checked;
+$('#enterApp').onclick=async()=>{const stored=localStorage.getItem('bpdi_pin_hash');if(stored){const pin=prompt('Digite o PIN local:');if(await sha256(pin||'')!==stored){toast('PIN incorreto');return}}localStorage.setItem('bpdi_confidential_accept','1');$('#confidentialGate').classList.add('hidden');render('dashboard')};
+const accepted=localStorage.getItem('bpdi_confidential_accept')==='1'; const hasPin=!!localStorage.getItem('bpdi_pin_hash'); if(accepted&&!hasPin){$('#confidentialGate').classList.add('hidden')}else if(hasPin){$('#confidentialAgree').checked=true;$('#enterApp').disabled=false}
+"""
+          new="""// Gate and boot — V3.0.1: robusto contra restauração automática do checkbox pelo navegador
+const gateAgree=$('#confidentialAgree'), gateEnter=$('#enterApp');
+function syncConfidentialGate(){if(!gateAgree||!gateEnter)return;gateEnter.disabled=!gateAgree.checked;}
+gateAgree.onchange=syncConfidentialGate;
+$('#enterApp').onclick=async()=>{if(!gateAgree.checked){toast('Confirme o uso confidencial para acessar a plataforma');syncConfidentialGate();return}const stored=localStorage.getItem('bpdi_pin_hash');if(stored){const pin=prompt('Digite o PIN local:');if(await sha256(pin||'')!==stored){toast('PIN incorreto');return}}localStorage.setItem('bpdi_confidential_accept','1');$('#confidentialGate').classList.add('hidden');render('dashboard')};
+const accepted=localStorage.getItem('bpdi_confidential_accept')==='1'; const hasPin=!!localStorage.getItem('bpdi_pin_hash'); if(accepted&&!hasPin){$('#confidentialGate').classList.add('hidden')}else if(hasPin){gateAgree.checked=true}
+syncConfidentialGate();
+window.addEventListener('pageshow',syncConfidentialGate);
+document.addEventListener('DOMContentLoaded',syncConfidentialGate);
+setTimeout(syncConfidentialGate,0);setTimeout(syncConfidentialGate,250);setTimeout(syncConfidentialGate,800);
+"""
+          if old not in h:
+              raise SystemExit('Trecho do gate não encontrado; hotfix não aplicado')
+          h=h.replace(old,new,1)
+          h=h.replace('Versão 3.0.0 · agosto/2026 · dados no navegador','Versão 3.0.1 · agosto/2026 · dados no navegador')
+          h=h.replace('"version":"3.0.0"','"version":"3.0.1"')
+          p.write_text(h,encoding='utf-8')
+          assert 'V3.0.1: robusto contra restauração automática' in h
+          assert 'Versão 3.0.1 · agosto/2026 · dados no navegador' in h
+          print('Hotfix V3.0.1 aplicado')
+          PY
+
+      - name: Commit hotfix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "fix: BPDI Platform OS v3.0.1 — access gate"
+          git push origin main
